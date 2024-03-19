@@ -1,2 +1,2 @@
 # Metagenomics-Analyses
-16S rRNA metagenomics analyses performed during graduate school 
+This is a collection of 16S rRNA metagenomics analyses. 
