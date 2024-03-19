@@ -1,0 +1,770 @@
+---
+title: "DOLPHIN 16s_uni"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+
+```{r setup, include=TRUE, eval=TRUE}
+knitr::opts_chunk$set(eval = FALSE, include = FALSE)
+#load wd
+path <- "/Users/callahanmcgovern/Desktop/POSH and DOLPHIN metabarcoding data/Dolphin/dolphin 16s"
+list.files(path)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = path)
+getwd()
+
+ps_dolphin <- readRDS("./ps_dolphin.rds")
+ps_dolphin
+ps_dolphin_clean <- subset_taxa(ps_dolphin, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized")) 
+
+```
+
+```{r libs, eval=TRUE, include=FALSE}
+library(dada2, quietly = T)
+library(magrittr)
+library(DECIPHER) 
+library(phangorn)
+library(phyloseq)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(knitr)
+```
+
+# Dada2
+```{r quality control, eval=FALSE, include=FALSE}
+#INSPECT READ QUALITY
+Fs <- sort(list.files('.', pattern="_R1.fastq", full.names = TRUE))
+Rs <- sort(list.files('.', pattern="_R2.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(Fs), "_"), `[`, 1)
+sample.names
+
+dir.create('fastqs_trimmed')
+list.files('.')
+list.files('./fastqs_trimmed')
+
+#plot quality profile for FWD/REV reads
+#The mean quality score at each position is shown by the green line
+#print(plotQualityProfile(Fs[1:4]))
+#print(plotQualityProfile(Rs[1:4]))
+
+```
+
+```{r filter and trim,eval=FALSE, include=FALSE}
+filtFs <- file.path('fastqs_trimmed', 
+                    paste0(sample.names, "_F_filt.fastq"))
+filtRs <- file.path('fastqs_trimmed', 
+                    paste0(sample.names, "_R_filt.fastq"))
+
+out <- filterAndTrim(fwd=Fs, filt=filtFs, 
+                     rev=Rs, filt.rev=filtRs, 
+                     maxEE=c(2,2),
+                     truncQ=2,
+                     rm.phix = TRUE,
+                     multithread=TRUE,
+                     compress = TRUE) 
+                     truncLen=c(240, 180)  
+list.files('fastqs_trimmed')
+saveRDS(out, file = "filtered.RDS")
+head(out)
+```
+
+```{r dada_denoise,eval=FALSE, include=FALSE}
+#REMOVE EXACT REPLICATES 
+dereplicated1 <- derepFastq(filtFs, verbose=T)
+names(dereplicated1) <- sample.names
+dereplicated2 <- derepFastq(filtRs, verbose=T)
+names(dereplicated2) <- sample.names
+
+#LEARN ERROR RATES
+##black line shows estimated error rates after convergence of the machine-learning algorithm. 
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+plotErrors(errF, nominalQ = T)
+
+#DADA DENOISE
+dadaFs <- dada(dereplicated1, err=errF, multithread = TRUE)
+dadaRs <- dada(dereplicated2, err=errR, multithread = TRUE)
+dadaFs
+dadaRs
+```
+
+```{r ASV,eval=FALSE, include=FALSE}
+#MERGE PAIRS
+merged <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose = T, trimOverhang = TRUE)
+class(merged) # list
+length(merged) # elements-- one for each of our samples
+names(merged) #name of each element
+
+#tells you how many merged samples you have and how many ASVs you have
+seqtab <- makeSequenceTable(merged, orderBy='abundance')
+rownames(seqtab)
+class(seqtab)
+dim(seqtab)
+
+#tells you length of various seqs found and their abundance 
+table(nchar(getSequences(seqtab)))
+
+#REMOVE CHIMERAS 
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread=TRUE, verbose = TRUE)
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab) #tells you % of merged reads that were not chimeras
+
+#this looks for all reads with an abundance of 1 and removes them (we do this because reads with abundance = 1 are most likely sequencing errors)
+is1 <- colSums(seqtab.nochim) <= 1
+seqtab <- seqtab.nochim[,!is1]
+
+table(nchar(getSequences(seqtab)))
+
+#making asv fasta file 
+asv_seqs <- colnames(seqtab)
+asv_headers <- vector(dim(seqtab)[2], mode="character")
+
+# for (i in 1:dim(seqtab)[2]) {
+#   asv_headers[i] <- paste(">ASV", i, sep="_")
+# }
+# asv_fasta <- c(rbind(asv_headers, asv_seqs))
+# write(asv_fasta, "../ASVs.fa")
+# read.FASTA("./ASVs.fa") #gives you info about ASVs
+# 
+# saveRDS(seqtab, "../seqtab_16s")
+```
+
+```{r track, eval=FALSE}
+
+#Track reads through the pipeline 
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(merged, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+print(track)
+track <- as.data.frame(track)
+write.csv((track), "reads_tracked")
+
+# sum total
+#install.packages("janitor")
+#library(janitor)
+#track <- track %>%
+#  adorn_totals("row")
+```
+
+```{r load,eval=FALSE, include=FALSE}
+seqtab_16s <- readRDS("../dolphin 16s/seqtab_16s")
+```
+
+```{r assign taxonomy, eval=FALSE,include=FALSE}
+library("dada2")
+database <- "../../databases/CyanoSeq_1.1.1_SILVA138.1_dada2.fastq.gz"
+taxa_16s <- assignTaxonomy(seqtab_16s, database, verbose=2, minBoot=80, multithread=TRUE)
+taxa_16s <- addSpecies(taxa_16s, "../../databases/silva_species_assignment_v138.1.fa.gz")
+
+#remove the seq as row names for easy viewing and explore taxa
+taxa.print <- taxa_16s
+rownames(taxa.print) <- NULL
+head(taxa.print, n = 52L)
+tail(taxa.print, n = 50L)
+
+#remove things IDd as chloroplast -- usually this is "junk" 
+chloroplasts <- taxa_16s[,"Order"] %in% "Chloroplast"
+seqtab.nochloro <- seqtab_16s[,!chloroplasts]
+taxa.nochloro <- taxa_16s[!chloroplasts,]
+
+#rename tables for ps_dolphin object
+taxa_table <- taxa.nochloro
+asvs <- seqtab.nochloro
+
+#manually check and adjust top ASVs as needed
+#taxa_table[c(1,2), "Genus"] <- "Microcoleus" #is it microcoleus or phormidium
+
+```
+
+```{r done ,eval=FALSE, include=FALSE}
+system("say done!")
+```
+
+
+# Phyloseq
+```{r phyloseq, eval=FALSE, include=FALSE}
+library(phyloseq)
+library(tibble)
+#import or create meta data df
+sample_data <- read.csv("../meta.csv")
+rownames(sample_data) <- sample_data[,1]
+
+# clean rownames 
+rownames(asvs) <-gsub("-16S","",as.character(rownames(asvs)))
+View(asvs)
+rownames(sample_data) <-gsub("-16S","",as.character(rownames(sample_data)))
+View(sample_data)
+
+
+library(phyloseq)
+#making a phyloseq object
+ps_dolphin <- phyloseq(otu_table(asvs, taxa_are_rows = F), 
+               tax_table(taxa_table),
+              sample_data(sample_data))
+
+
+#change from actual seq to "ASVs"
+dna <- Biostrings::DNAStringSet(taxa_names(ps_dolphin))
+names(dna) <- taxa_names(ps_dolphin)
+ps_dolphin <- merge_phyloseq(ps_dolphin, dna)
+taxa_names(ps_dolphin) <- paste0("ASV", seq(ntaxa(ps_dolphin)))
+
+save to reuse later
+saveRDS(ps_dolphin, "ps_dolphin.rds")
+ps_dolphin <- readRDS("./ps_dolphin.rds")
+ps_dolphin
+
+#VIEW SUB-OBJECTS AS DESIRED
+View(tax_table(ps_dolphin))
+View(otu_table(ps_dolphin))
+View(sample_data(ps_dolphin))
+```
+
+```{r lows and no lows, include=FALSE, eval=TRUE}
+ps_dolphin <- readRDS("./ps_dolphin.rds")
+ps_dolphin
+
+#keep samples with more than 10,000 depth 
+ps_dolphin_nolows <- subset_taxa(ps_dolphin, sample_sums(ps_dolphin) > 1000)
+ps_dolphin_nolows <- subset_samples(ps_dolphin_nolows, sample_sums(ps_dolphin) > 1000)
+
+saveRDS(ps_dolphin_nolows, "ps_dolphin_nolows.rds")
+ps_dolphin_nolows <- readRDS("./ps_dolphin_nolows.rds")
+ps_dolphin_nolows
+
+ps_dolphin_lows <- subset_taxa(ps_dolphin, sample_sums(ps_dolphin) < 1000)
+ps_dolphin_lows <- subset_samples(ps_dolphin_lows, sample_sums(ps_dolphin) < 1000)
+
+saveRDS(ps_dolphin_lows, "ps_dolphin_lows.rds")
+ps_dolphin_lows <- readRDS("./ps_dolphin_lows.rds")
+ps_dolphin_lows
+```
+
+```{r ranks, echo=FALSE, include=FALSE, eval=TRUE}
+#show available ranks
+rank_names(ps_dolphin)
+
+#check out phylum and genus for top 10 ASVs
+tax_table(ps_dolphin)[1:10, c(2,6)]
+
+ps_dolphin_clean <- subset_taxa(ps_dolphin, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized")) 
+```
+
+```{r dedup, eval=TRUE ,include=FALSE}
+#DEDUP BY PHYLA
+#tax_table(ps_dolphin)[1:3,1:3] # check for my table show me [1 - 3 otu ids, 1 to 3 first three ranks].
+ps_dolphin.phylum <- tax_glom(physeq=ps_dolphin_clean, taxrank = "Phylum", NArm = F) #agglomoration command
+#taxa_names(ps_dolphin.phylum)[1:5] #check out taxa names
+taxa_names(ps_dolphin.phylum) <- tax_table(ps_dolphin.phylum)[,"Phylum"] #replace ASV with name of phylum
+taxa_names(ps_dolphin.phylum)[1:6] #look at taxa names now
+```
+
+# phylum and the mean % presence across all samples!
+
+```{r top phyla table, eval=T, include=F}
+library(tidyr)
+library(dplyr)
+
+T <- ps_dolphin_clean %>% 
+    tax_glom(., "Phylum") %>% 
+    transform_sample_counts(function(x)100* x / sum(x)) %>% psmelt() %>% 
+    arrange(OTU) %>% rename(OTUsID = OTU) %>% 
+    select(OTUsID, Phylum, Sample, Abundance) %>%
+    spread(Sample, Abundance)
+
+T$Mean <- rowMeans(T[, c(3:ncol(T))])
+
+PHYLUM <- T[, c("Phylum", "Mean" ) ]
+
+#order data frame  
+PHYLUM <- PHYLUM[order(dplyr::desc(PHYLUM$Mean)),]
+rownames(PHYLUM) <- NULL
+```
+
+```{r, eval=TRUE, include=TRUE}
+kable(head(PHYLUM, n=10))
+```
+
+```{r top phyla, echo=TRUE, eval=T, include=FALSE}
+#MAKING A TOP 10 PHYLUM TABLE 
+top_phyla_table <- otu_table(ps_dolphin.phylum)
+top_phyla_table <- top_phyla_table[, 1:10]
+#print(top_phyla_table)
+
+#MAKE RELATIVE ABUNDANCE TABLE OF EACH 
+#______________________________by top phyla________________________________________
+phy.transform <- transform_sample_counts(top_phyla_table, function(x) x / sum(x))
+phy.transform <-round(otu_table(phy.transform), digits = 3)
+
+#make bar plot of phyla in each sample
+phyla_plots <- plot_bar(ps_dolphin.phylum, fill = "Phylum") + 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position="stack")
+
+# should we make with just top phyla?? 
+twenty_phyla <- names(sort(taxa_sums(ps_dolphin.phylum), TRUE)[1:10])
+twenty_phyla <- prune_taxa(twenty_phyla, ps_dolphin.phylum)
+twenty_phyla_plots <- plot_bar(twenty_phyla, fill = "Phylum") + 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position="stack")
+
+#phyla_plots
+#twenty_phyla_plots
+
+relabund_phyla <- transform_sample_counts(twenty_phyla, function(x) x / sum(x))
+rel_phyla_plot <- plot_bar(relabund_phyla, x = "Sample", fill="Phylum") + geom_bar(aes(color = Phylum, fill = Phylum), stat = "identity", position = "stack") #plot function
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+```
+
+```{r, eval=TRUE, include=TRUE}
+rel_phyla_plot
+```
+
+# Genus and the % presence averaged across all samples!
+
+```{r top Genus_dolphins tab, echo=FALSE, include=F, eval=TRUE}
+T <- ps_dolphin %>% 
+    tax_glom(., "Genus") %>% 
+    transform_sample_counts(function(x)100* x / sum(x)) %>% psmelt() %>% 
+    arrange(OTU) %>% rename(OTUsID = OTU) %>% 
+    select(OTUsID, Genus, Sample, Abundance) %>%
+    spread(Sample, Abundance)
+
+T$Mean <- rowMeans(T[, c(3:ncol(T))])
+
+Genus_dolphin <- T[, c("Genus", "Mean" ) ]
+
+#order data frame  
+Genus_dolphin <- Genus_dolphin[order(dplyr::desc(Genus_dolphin$Mean)),]
+rownames(Genus_dolphin) <- NULL
+```
+
+```{r, eval=TRUE, include=TRUE}
+head(Genus_dolphin, n=20)
+```
+
+```{r}
+tax_table(ps_dolphin)[c(1), "Genus"] <- "Tenacibaculum"
+tax_table(ps_dolphin)[c(9), "Genus"] <- "Peptostreptococcus "
+
+```
+
+
+```{r Genus_dolphinily, include=FALSE, eval=TRUE, echo=TRUE, warning=FALSE, tidy=TRUE, fig.align='center', fig.width=6, fig.height=4}
+#MAKING TOP Genus_dolphin BAR PLOT
+ps_dolphin.gen <- tax_glom(physeq=ps_dolphin, taxrank = "Genus") #agglomoration command
+topgen <- names(sort(taxa_sums(ps_dolphin.gen), TRUE)[1:10]) #pick top # of choice here
+topgen <- prune_taxa(topgen, ps_dolphin.gen) # prune based on selection above
+relabundgen <- transform_sample_counts(topgen, function(x) x / sum(x)) #find relative abundance of top genera
+gen_plot <- plot_bar(relabundgen, fill="Genus") + geom_bar(aes(color = Genus, fill = Genus), stat = "identity", position = "stack") 
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+```
+
+```{r, eval=TRUE, include=TRUE}
+gen_plot
+```
+
+```{r cyanos}
+ps_dolphin_cyanos <- subset_taxa(ps_dolphin, Phylum == "Cyanobacteria" | Phylum == "Cyanobacteriota")
+View(tax_table(ps_dolphin_cyanos))
+write.csv(tax_table(ps_dolphin_cyanos), "cyanos.csv")
+
+ps_dolphin_lows_cyanos <- subset_taxa(ps_dolphin_lows, Phylum == "Cyanobacteria" | Phylum == "Cyanobacteriota")
+View(tax_table(ps_dolphin_lows_cyanos))
+write.csv(tax_table(ps_dolphin_lows_cyanos), "cyanos_lows.csv")
+
+
+#order level bar plot
+ps_dolphin_cyano_Order <- tax_glom(physeq=ps_dolphin_cyanos, taxrank = "Order", NArm = F) #agglomoration command
+topOrder <- names(sort(taxa_sums(ps_dolphin_cyano_Order), TRUE)[1:10]) #pick top # of choice here
+topOrder <- prune_taxa(topOrder, ps_dolphin_cyano_Order) # prune based on selection above
+relabundOrder <- transform_sample_counts(topOrder, function(x) x / sum(x)) #find relative abundance of top genera
+Order_plot <- plot_bar(relabundOrder, fill="Order") + geom_bar(aes(color = Order, fill = Order), stat = "identity", position = "stack") 
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+Order_plot
+
+# genus level bar plot
+ps_dolphin_cyano_Genus <- tax_glom(physeq=ps_dolphin_cyanos, taxrank = "Genus", NArm = F) #agglomoration command
+topGenus <- names(sort(taxa_sums(ps_dolphin_cyano_Genus), TRUE)[1:10]) #pick top # of choice here
+topGenus <- prune_taxa(topGenus, ps_dolphin_cyano_Genus) # prune based on selection above
+relabundGenus <- transform_sample_counts(topGenus, function(x) x / sum(x)) #find relative abundance of top genera
+Genus_plot <- plot_bar(relabundGenus, fill="Genus") + geom_bar(aes(color = Genus, fill = Genus), stat = "identity", position = "stack") 
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+Genus_plot
+
+```
+
+```{r per dolphin}
+dolphin_1319 <- subset_samples(ps_dolphin, dolphin  %in%  "1319" )
+dolphin_2016 <- subset_samples(ps_dolphin, dolphin  %in%  "2016" )
+dolphin_1249 <- subset_samples(ps_dolphin, dolphin  %in%  "1249" )
+dolphin_2021 <- subset_samples(ps_dolphin, dolphin  %in%  "2021" )
+dolphin_2104 <- subset_samples(ps_dolphin, dolphin  %in%  "2104" )
+dolphin_2206 <- subset_samples(ps_dolphin, dolphin  %in%  "2206" )
+dolphin_2018 <- subset_samples(ps_dolphin, dolphin  %in%  "2018" )
+dolphin_1934 <- subset_samples(ps_dolphin, dolphin  %in%  "1934" )
+dolphin_2015 <- subset_samples(ps_dolphin, dolphin  %in%  "2015" )
+dolphin_2226 <- subset_samples(ps_dolphin, dolphin  %in%  "2226" )
+dolphin_1030 <- subset_samples(ps_dolphin, dolphin  %in%  "1030" )
+dolphin_2004 <- subset_samples(ps_dolphin, dolphin  %in%  "2004" )
+dolphin_2015 <- subset_samples(ps_dolphin, dolphin  %in%  "2015" )
+
+dolphin_1319 <- prune_taxa(taxa_sums(dolphin_1319) > 0, dolphin_1319)
+dolphin_2016 <- prune_taxa(taxa_sums(dolphin_2016) > 0, dolphin_2016)
+dolphin_1249 <- prune_taxa(taxa_sums(dolphin_1249) > 0, dolphin_1249)
+dolphin_2021 <- prune_taxa(taxa_sums(dolphin_2021) > 0, dolphin_2021)
+dolphin_2104 <- prune_taxa(taxa_sums(dolphin_2104) > 0, dolphin_2104)
+dolphin_2206 <- prune_taxa(taxa_sums(dolphin_2206) > 0, dolphin_2206)
+dolphin_2018 <- prune_taxa(taxa_sums(dolphin_2018) > 0, dolphin_2018)
+dolphin_1934 <- prune_taxa(taxa_sums(dolphin_1934) > 0, dolphin_1934)
+dolphin_2015 <- prune_taxa(taxa_sums(dolphin_2015) > 0, dolphin_2015)
+dolphin_2226 <- prune_taxa(taxa_sums(dolphin_2226) > 0, dolphin_2226)
+dolphin_1030 <- prune_taxa(taxa_sums(dolphin_1030) > 0, dolphin_1030)
+dolphin_2004 <- prune_taxa(taxa_sums(dolphin_2004) > 0, dolphin_2004)
+dolphin_2015 <- prune_taxa(taxa_sums(dolphin_2015) > 0, dolphin_2015)
+
+write.csv(tax_table(dolphin_1319), "dolphin_1319.csv")
+write.csv(tax_table(dolphin_2016), "dolphin_2016.csv")
+write.csv(tax_table(dolphin_1249), "dolphin_1249.csv")
+write.csv(tax_table(dolphin_2021), "dolphin_2021.csv")
+write.csv(tax_table(dolphin_2104), "dolphin_2104.csv")
+write.csv(tax_table(dolphin_2206), "dolphin_2206.csv")
+write.csv(tax_table(dolphin_2018), "dolphin_2018.csv")
+write.csv(tax_table(dolphin_1934), "dolphin_1934.csv")
+write.csv(tax_table(dolphin_2015), "dolphin_2015.csv")
+write.csv(tax_table(dolphin_2226), "dolphin_2226.csv")
+write.csv(tax_table(dolphin_1030), "dolphin_1030.csv")
+write.csv(tax_table(dolphin_2004), "dolphin_2004.csv")
+write.csv(tax_table(dolphin_2015), "dolphin_2015.csv")
+
+
+write.table(ps_dolphin %>% transform_sample_counts(function(x) {x/sum(x)}) %>% psmelt() %>% 
+	arrange(OTU) %>% rename(ASV = OTU) %>% 
+        select(ASV, Kingdom, Phylum, Class, Order, Genus_dolphinily, Genus, Species, Sample, Abundance) %>%
+        spread(Sample, Abundance), 
+	file = "dolphin_rel_abund.tsv", sep = "\t", quote = F, row.names = F, col.names = T)
+
+write.table(ps_dolphin %>% tax_glom(taxrank = "Phylum") %>% 
+        transform_sample_counts(function(x) {x/sum(x)}) %>% psmelt() %>%
+        select(Phylum, Sample, Abundance) %>% spread(Sample, Abundance), 
+	file = "dolphin_rel_abund_phylum.tsv", sep = "\t", quote = F, row.names = F, col.names = T)
+
+write.table(ps_dolphin %>% tax_glom(taxrank = "Genus") %>% 
+        transform_sample_counts(function(x) {x/sum(x)}) %>% psmelt() %>% 
+        select(Genus, Sample, Abundance) %>% spread(Sample, Abundance), 
+	file = "dolphin_rel_abund_genus.tsv", sep = "\t", quote = F, row.names = F, col.names = T)
+```
+
+```{r}
+#dolphin_1319
+#dolphin_2016
+#dolphin_1249
+#dolphin_2021
+#dolphin_2104
+#dolphin_2206
+#dolphin_2018
+#dolphin_1934
+#dolphin_2015
+#dolphin_2226
+#dolphin_1030
+#dolphin_2004
+#dolphin_2015
+
+ps_dolphin.gen <- tax_glom(physeq=dolphin_1319, taxrank = "Genus", NArm = F) #agglomoration command
+topgen <- names(sort(taxa_sums(ps_dolphin.gen), TRUE)[1:10]) #pick top # of choice here
+topgen <- prune_taxa(topgen, ps_dolphin.gen) # prune based on selection above
+relabundgen <- transform_sample_counts(topgen, function(x) x / sum(x)) #find relative abundance of top genera
+gen_plot <- plot_bar(relabundgen, fill="Genus") + geom_bar(aes(color = Genus, fill = Genus), stat = "identity", position = "stack") 
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+gen_plot
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+# splitting algae vs non algae 
+```{r}
+Algae_dolphins <- subset_samples(ps_dolphin_clean, sample == "1" | sample == "2" | sample == "3"| sample == "4"| sample == "5"| sample == "7"| sample == "8" | sample =="9"| sample == "12"| sample == "14")  
+Algae_dolphins  <- prune_taxa(taxa_sums(Algae_dolphins) > 0, Algae_dolphins)
+Algae_dolphins
+
+
+nonAlgae_dolphins <- subset_samples(ps_dolphin_clean, sample == "6" | sample == "10" | sample == "13")
+nonAlgae_dolphins  <- prune_taxa(taxa_sums(nonAlgae_dolphins) > 0, nonAlgae_dolphins)
+nonAlgae_dolphins
+```
+
+# microshades with all bacteria 
+```{r}
+library(microshades)
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(patchwork)
+library(microViz)
+
+```
+
+```{r}
+tax_top(Algae_dolphins, n = 6, by = "prev", rank = "Phylum", use_counts = FALSE)
+tax_top(nonAlgae_dolphins, n = 6, by = "prev", rank = "Phylum", use_counts = FALSE)
+
+```
+##algaedolphin 
+```{r}
+# Agglomerate and normalize the phyloseq object, and melt to a data frame
+mdf_prep <- prep_mdf(Algae_dolphins)
+
+# Generate a color object for the specified data
+color_objs_GP <- create_color_dfs(mdf_prep,selected_groups = c("Bacteroidota", "Proteobacteria", "Firmicutes", "Fusobacteriota", "Planctomycetota") , cvd = TRUE)
+
+# Extract
+mdf_GP <- color_objs_GP$mdf
+cdf_GP <- color_objs_GP$cdf
+```
+
+
+```{r}
+# Plot
+plot <- plot_microshades(mdf_GP, cdf_GP)
+
+plot_1 <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.key.size = unit(0.2, "cm"), text=element_text(size=10)) +
+  theme(axis.text.x = element_text(size= 6)) 
+
+plot_1 
+```
+
+
+```{r}
+plot_2 <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.key.size = unit(0.2, "cm"), text=element_text(size=10)) +
+  theme(axis.text.x = element_text(size= 6)) +
+  facet_wrap(~dolphin, scales = "free_x", nrow = 2) +
+  theme (strip.text.x = element_text(size = 6))
+
+plot_2
+```
+
+
+```{r}
+GP_legend <-custom_legend(mdf_GP, cdf_GP)
+
+plot_diff <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.position = "none")  +
+  theme(axis.text.x = element_text(size= 6)) +
+  facet_wrap(~dolphin, scales = "free_x", nrow = 2) +
+  theme(axis.text.x = element_text(size= 6)) + 
+  theme(plot.margin = margin(6,20,6,6))
+
+plot_grid(plot_diff, GP_legend,  rel_widths = c(1, .5))
+```
+
+
+```{r}
+new_groups <- extend_group(mdf_GP, cdf_GP, "Phylum", "Genus", "Proteobacteria", existing_palette = "micro_cvd_orange", new_palette = "micro_orange", n_add = 2)
+
+GP_legend_new <-custom_legend(new_groups$mdf, new_groups$cdf)
+
+plot_diff <- plot_microshades(new_groups$mdf, new_groups$cdf) + 
+  scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.position = "none")  +
+  theme(axis.text.x = element_text(size= 6)) +
+  facet_wrap(~dolphin, scales = "free_x", nrow = 2) +
+  theme(axis.text.x = element_text(size= 6)) + 
+  theme(plot.margin = margin(6,20,6,6))
+
+plot_grid(plot_diff, GP_legend_new,  rel_widths = c(.5, .5))
+
+```
+
+
+```{r}
+```
+
+
+
+##nonalgae dolphin 
+```{r}
+# Agglomerate and normalize the phyloseq object, and melt to a data frame
+mdf_prep <- prep_mdf(nonAlgae_dolphins)
+
+# Generate a color object for the specified data
+color_objs_GP <- create_color_dfs(mdf_prep,selected_groups = c("Bacteroidota", "Proteobacteria", "Firmicutes", "Desulfobacterota", "Cyanobacteriota") , cvd = TRUE)
+
+# Extract
+mdf_GP <- color_objs_GP$mdf
+cdf_GP <- color_objs_GP$cdf
+```
+
+
+```{r}
+# Plot
+plot <- plot_microshades(mdf_GP, cdf_GP)
+
+plot_1 <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.key.size = unit(0.2, "cm"), text=element_text(size=10)) +
+  theme(axis.text.x = element_text(size= 6)) 
+
+plot_1 
+```
+```{r}
+GP_legend <-custom_legend(mdf_GP, cdf_GP)
+
+plot_diff <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.position = "none")  +
+  theme(axis.text.x = element_text(size= 6)) +
+  facet_wrap(~dolphin, scales = "free_x", nrow = 1) +
+  theme(axis.text.x = element_text(size= 6)) + 
+  theme(plot.margin = margin(6,20,6,6))
+
+plot_grid(plot_diff, GP_legend,  rel_widths = c(1, 1))
+```
+
+
+
+
+# barplots / heatmaps with cyanos
+```{r}
+library(microshades)
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+library(patchwork)
+library(microViz)
+
+```
+
+```{r}
+cyanos_dolphins <- subset_taxa(ps_dolphin_clean, Phylum == "Cyanobacteriota")
+ cyanos_dolphins <- prune_samples(sample_sums(cyanos_dolphins)>=1, cyanos_dolphins)
+
+
+cyanos_Algae_dolphins <- subset_samples(cyanos_dolphins, sample == "1" | sample == "2" | sample == "3"| sample == "4"| sample == "5"| sample == "7"| sample == "8" | sample =="9"| sample == "12"| sample == "14")  
+cyanos_Algae_dolphins  <- prune_taxa(taxa_sums(cyanos_Algae_dolphins) > 0, cyanos_Algae_dolphins)
+cyanos_Algae_dolphins
+
+
+cyanos_nonAlgae_dolphins <- subset_samples(cyanos_dolphins, sample == "6" | sample == "10" | sample == "13")
+cyanos_nonAlgae_dolphins  <- prune_taxa(taxa_sums(cyanos_nonAlgae_dolphins) > 0, cyanos_nonAlgae_dolphins)
+cyanos_nonAlgae_dolphins
+
+cyanos_Algae_dolphins <- cyanos_Algae_dolphins %>%
+ tax_fix(
+  min_length = 4,
+  unknowns = c(""),
+  sep = " ", anon_unique = TRUE,
+  suffix_rank = "classified"
+ )
+cyanos_nonAlgae_dolphins <- cyanos_nonAlgae_dolphins %>%
+ tax_fix(
+  min_length = 4,
+  unknowns = c(""),
+  sep = " ", anon_unique = TRUE,
+  suffix_rank = "classified"
+ )
+
+tax_top(cyanos_Algae_dolphins, n = 5, by = "prev", rank = "Order", use_counts = FALSE)
+tax_top(cyanos_nonAlgae_dolphins, n = 5, by = "prev", rank = "Order", use_counts = FALSE)
+
+```
+
+```{r}
+# genus level bar plot
+gen_cyanos_Algae_dolphins <- tax_glom(physeq=cyanos_Algae_dolphins, taxrank = "Genus", NArm = F) #agglomoration command
+topGenus <- names(sort(taxa_sums(gen_cyanos_Algae_dolphins), TRUE)[1:10]) #pick top # of choice here
+topGenus <- prune_taxa(topGenus, gen_cyanos_Algae_dolphins) # prune based on selection above
+relabundGenus <- transform_sample_counts(topGenus, function(x) x / sum(x)) #find relative abundance of top genera
+algaeD_Genus_plot <- plot_bar(relabundGenus, fill="Genus") + geom_bar(aes(color = Genus, fill = Genus), stat = "identity", position = "stack") 
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+algaeD_Genus_plot
+
+# genus level bar plot
+gen_cyanos_nonAlgae_dolphins <- tax_glom(physeq=cyanos_nonAlgae_dolphins, taxrank = "Genus", NArm = F) #agglomoration command
+topGenus <- names(sort(taxa_sums(gen_cyanos_nonAlgae_dolphins), TRUE)[1:10]) #pick top # of choice here
+topGenus <- prune_taxa(topGenus, gen_cyanos_nonAlgae_dolphins) # prune based on selection above
+relabundGenus <- transform_sample_counts(topGenus, function(x) x / sum(x)) #find relative abundance of top genera
+nonalgaeD_Genus_plot <- plot_bar(relabundGenus, fill="Genus") + geom_bar(aes(color = Genus, fill = Genus), stat = "identity", position = "stack") 
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+nonalgaeD_Genus_plot
+```
+
+
+
+```{r}
+#cyanos_Algae_dolphins %>% 
+#  tax_transform("compositional", rank = "Genus") %>% 
+#  comp_heatmap()
+
+cols <- distinct_palette(n = 10, add = NA)
+names(cols) <- unique(samdat_tbl(cyanos_Algae_dolphins)$dolphin)
+
+cyanos_Algae_dolphins %>% 
+  tax_transform("hellinger", rank = "Genus") %>% 
+  comp_heatmap(
+    tax_anno = taxAnnotation(
+      Prev. = anno_tax_prev(bar_width = 0.3, size = grid::unit(1, "cm"))
+    ),
+    sample_anno = sampleAnnotation(
+      Dolphin = anno_sample("dolphin"),
+      col = list(dolphin = cols), border = FALSE,
+    )          
+  ) 
+
+
+
+```
+
+
+# finding ASVs present across all dolphins
+```{r}
+library("MicEco") 
+# venn diagram can only do up to 5 groups at a time
+# venn <- ps_venn(ps_dolphin_clean,"dolphin", quantities = list(type=c("percent","counts"), font = 2), labels = list(cex = 2))
+
+asv_tab <- data.frame(otu_table(ps_dolphin_clean)[,]) 
+write.csv(asv_tab, "ASVs_dolphin.csv")  # YOU CAN SEE THERE ARE NO ASVS IN ALL SAMPLES.. BUT THERE MAY BE SAME SPECIES ACROSS SAMPLES 
+
+# ABOVE METHOD WITH GENERA AS COLUMNS
+dolphin_genera <- ps_dolphin %>% tax_glom(., "Genus", NArm = TRUE)
+taxa_names(dolphin_genera)[1:5]
+taxa_names(dolphin_genera) <- tax_table(dolphin_genera)[,"Genus"]
+taxa_names(dolphin_genera)[1:5]
+
+genera_tab <- data.frame(otu_table(dolphin_genera)[,]) 
+write.csv(genera_tab, "genera_dolphin.csv") 
+
+#############################################
+devtools::install_github("vmikk/metagMisc")
+#prevalence filtering
+View(tax_table(phyloseq_filter_prevalence(
+     dolphin_genera,
+     prev.trh = 0.9,
+     abund.trh = NULL,
+     threshold_condition = "OR",
+     abund.type = "total"
+ )))
+
+
+nrow(ps_dolphin@otu_table)
+ps_dolphin
+ps.prune <- prune_taxa(taxa_sums(ps_dolphin) > 0, ps_dolphin)
+nrow(ps.prune@otu_table)
+ps.prune
+
+```
+
