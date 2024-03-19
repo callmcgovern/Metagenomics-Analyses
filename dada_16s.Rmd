@@ -1,0 +1,312 @@
+---
+title: "dada2_16s_uni"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+In this file, we will process 16s (cyano and uni) metabarcoding data using the Dada2 pipeline. (DATA REDUCTION STAGE)
+
+The first thing you must do is to set up your environment and load the necessary libraries and your data. 
+desired outcome: https://compbiocore.github.io/metagenomics-workshop/assets/DADA2_tutorial.html
+
+```{r setup, include=FALSE}
+#load wd
+path <- "/Users/callahanmcgovern/Desktop/Research/LHM/metabarcoding.2/16s_analyses/dada2_inputs/16s"
+setwd(path)
+list.files(path)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = path)
+getwd()
+
+```
+
+``` {r libs}
+library("dada2", quietly = T)
+library(magrittr, quietly = T)
+library(DECIPHER, quietly = T) 
+library(phangorn, quietly = T)
+library(phyloseq, quietly = T)
+```
+
+In the next code chunk we will do quality control of our sample reads. 
+  This will begin by sorting your sample reads into forward and reverse reads by looking for the _R1.fastq extension. ** Make sure this is the extension your files use, if not, change the code to match your fwd/rev extension pattern. 
+    Then, we will extract the base of the sample names and visualize the quality of our reads. You do not need to see all forward and reverse reads for each sample. We pick the first two from both here to get an idea of quality. This will help determine where you trim your reads. 
+    Lastly, we filter and trim our reads based on the quality reading above. 
+
+## Dada2 pipeline  
+```{r quality control}
+#INSPECT READ QUALITY
+Fs <- sort(list.files(path, pattern="_R1.fastq", full.names = TRUE))
+Rs <- sort(list.files(path, pattern="_R2.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(Fs), "_"), `[`, 1)
+sample.names
+
+dir.create('fastqs_trimmed')
+list.files('.')
+list.files('./fastqs_trimmed')
+
+#plot quality profile for FWD/REV reads
+#The mean quality score at each position is shown by the green line
+print(plotQualityProfile(Fs[2:4]))
+print(plotQualityProfile(Rs[2:4]))
+
+```
+For the universal 16s primer set we need a 411bp (515F-926R) merged product and there must be overlap between the F and R reads. 
+So, when choosing where to trim seqs, think about quality and overlap. 
+Q-score (y axis)above 25 is favorable. 
+
+``` {r filter and trim}
+filtFs <- file.path('fastqs_trimmed', 
+                    paste0(sample.names, "_F_filt.fastq"))
+filtRs <- file.path('fastqs_trimmed', 
+                    paste0(sample.names, "_R_filt.fastq"))
+
+out <- filterAndTrim(fwd=Fs, filt=filtFs, 
+                     rev=Rs, filt.rev=filtRs, 
+                     maxEE=c(2,2),
+                     truncQ=2,
+                     rm.phix = TRUE,
+                     multithread=TRUE,
+                     compress = TRUE) 
+                     truncLen=c(240, 180)  
+list.files('fastqs_trimmed')
+saveRDS(out, file = "filtered.RDS")
+head(out)
+```
+
+
+Now its time to perform the core dada2 algorithm. Here we will instruct dada to learn the error rated of the samples and then it will use this rate to perform a denoising step. Inbetween we delete replicates for less noise as well. 
+Red line shows error rates expected under the nominal definition of the Q-score
+You want the black line to track with the observed rates (points) and the error rate should drop with increased quality
+
+``` {r dada_denoise}
+#REMOVE EXACT REPLICATES 
+dereplicated1 <- derepFastq(filtFs, verbose=T)
+names(dereplicated1) <- sample.names
+dereplicated2 <- derepFastq(filtRs, verbose=T)
+names(dereplicated2) <- sample.names
+
+#LEARN ERROR RATES
+##black line shows estimated error rates after convergence of the machine-learning algorithm. 
+errF <- learnErrors(filtFs, multithread = TRUE)
+errR <- learnErrors(filtRs, multithread = TRUE)
+plotErrors(errF, nominalQ = T)
+
+#DADA DENOISE
+dadaFs <- dada(dereplicated1, err=errF, multithread = TRUE)
+dadaRs <- dada(dereplicated2, err=errR, multithread = TRUE)
+dadaFs
+dadaRs
+```
+
+Here we will merge our trimmed, filtered, denoised forward and reverse sequences. Then you will create a table (seqtab) which will hold all of your ASVs and order them by abundance. Lastly you will remove chimeras and finally, save your results to a fasta file if you are stopping after this point.
+
+``` {r ASV}
+#MERGE PAIRS
+merged <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose = T, trimOverhang = TRUE)
+class(merged) # list
+length(merged) # elements-- one for each of our samples
+names(merged) #name of each element
+
+#tells you how many merged samples you have and how many ASVs you have
+seqtab <- makeSequenceTable(merged, orderBy='abundance')
+rownames(seqtab)
+class(seqtab)
+dim(seqtab)
+
+#tells you length of various seqs found and their abundance 
+table(nchar(getSequences(seqtab)))
+
+#REMOVE CHIMERAS 
+seqtab.nochim <- removeBimeraDenovo(seqtab, method = "consensus", multithread=TRUE, verbose = TRUE)
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab) #tells you % of merged reads that were not chimeras
+
+#this looks for all reads with an abundance of 1 and removes them (we do this because reads with abundance = 1 are most likely sequencing errors)
+is1 <- colSums(seqtab.nochim) <= 1
+seqtab <- seqtab.nochim[,!is1]
+
+#look at read lengths and trim seqs that are not the desired read - dont have to do this...
+#For the universal 16s primer set we need a 411bp (515F-926R) merged product and there must be overlap between the F and R reads. 
+# table(nchar(getSequences(seqtab)))
+# short <- nchar(getSequences(seqtab)) < 355
+# seqtab.sized <- seqtab[,!short]
+# seqtab <- seqtab.sized
+# table(nchar(getSequences(seqtab)))
+# 
+# #making asv fasta file 
+# asv_seqs <- colnames(seqtab)
+# asv_headers <- vector(dim(seqtab)[2], mode="character")
+# 
+# for (i in 1:dim(seqtab)[2]) {
+#   asv_headers[i] <- paste(">ASV", i, sep="_")
+# }
+# asv_fasta <- c(rbind(asv_headers, asv_seqs))
+# write(asv_fasta, "../ASVs.fa")
+# read.FASTA("./ASVs.fa") #gives you info about ASVs
+# 
+# saveRDS(seqtab, "../seqtab_16s")
+```
+
+Now lets track the reads through our pipeline so far so we can see how many have been discarded in each step along the way.
+
+``` {r track}
+
+#Track reads through the pipeline 
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(merged, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+print(track)
+track <- as.data.frame(track)
+write.csv((track), "reads_tracked_16S")
+
+#install.packages("janitor")
+library(janitor)
+track <- track %>%
+  adorn_totals("row")
+write.csv((track[87,]), "reads_tracked")
+```
+
+## Taxonomy assignment
+
+Load back your seqtab
+``` {r load}
+seqtab_16s <- readRDS("./seqtab_16s")
+```
+
+Now we can assign taxonomic identification for our ASVs! Choose your database carefully, your data is only as good as your database.
+``` {r assign taxonomy}
+library("dada2")
+database <- "../databases/CyanoSeq_1.1.1_SILVA138.1_dada2.fastq.gz"
+taxa_16s <- assignTaxonomy(seqtab_16s, database, verbose=2, minBoot=80, multithread=TRUE)
+taxa_16s <- addSpecies(taxa_16s, "../databases/silva_species_assignment_v138.1.fa.gz")
+
+#remove the seq as row names for easy viewing and explore taxa
+taxa.print <- taxa_16s
+rownames(taxa.print) <- NULL
+head(taxa.print, n = 52L)
+tail(taxa.print, n = 50L)
+
+#remove things IDd as chloroplast -- usually this is "junk" 
+chloroplasts <- taxa_16s[,"Order"] %in% "Chloroplast"
+seqtab.nochloro <- seqtab_16s[,!chloroplasts]
+taxa.nochloro <- taxa_16s[!chloroplasts,]
+
+#rename tables for ps object
+taxa_table <- taxa.nochloro
+asvs <- seqtab.nochloro
+
+```
+
+```{r done}
+system("say done!")
+```
+
+
+Now we can align our sequences and make a phylogenetic tree: 
+
+```{r creating a tree}
+library(DECIPHER)
+library(phangorn)
+seqs <- getSequences(asvs)
+names(seqs) <- seqs 
+alignment <- AlignSeqs(DNAStringSet(seqs), anchor = NA) #Run Sequence Alignment (MSA) using DECIPHER
+phang.align <- phyDat(as(alignment, "matrix"), type = "DNA") #Change sequence alignment output into a phyDat structure
+dm <- dist.ml(phang.align) # distance matrix
+treeNJ <- NJ(dm) # NJ tree
+fit = pml(treeNJ, data=phang.align)
+View(fit)
+fitGTR <- update(fit, k=4, inv=0.2)
+fitGTR_RTDB <- optim.pml(fitGTR, model="GTR", optInv = TRUE, optGamma = TRUE, rearrangement = "NNI", control = pml.control(trace=0))
+
+#fitGTR_RTDB <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+         #           rearrangement = "stochastic", control = pml.control(trace = 0))   #this takes forever 
+
+save(fitGTR, file=("fitGTR.RData"))
+fitGTR <- load("fitGTR.RData")
+View(fitGTR)
+
+save(fitGTR_RTDB$tree, file=("fitGTR_tree.RData"))
+View(fitGTR_RTDB$tree)
+
+fitGTR_tree <- load("fitGTR_tree.RData")
+
+save(treeNJ, file=("treeNJ.RData"))
+View(treeNJ)
+
+
+
+```
+
+
+Finally, use all data processed so far to create a phyloseq object which contains the ASV table, taxa table, sample meta data, phylogenetic tree. 
+```{r phyloseq}
+library(phyloseq)
+library(tibble)
+#import or create meta data df
+sample_data <- read.csv("../2022meta.csv")
+sample_data <- sample_data[,-1]
+rownames(sample_data) <- sample_data[,1]
+
+# clean rownames of asvs
+rownames(asvs) <-gsub("-16S","",as.character(rownames(asvs)))
+View(asvs)
+
+
+library(phyloseq)
+#making a phyloseq object
+ps <- phyloseq(otu_table(asvs, taxa_are_rows = F), 
+               tax_table(taxa_table),
+               sample_data(sample_data))
+             #  phy_tree(treeNJ))
+
+
+
+##add this to ps object when complete
+#set.seed(711) #root tree for unifrac 
+#phy_tree(ps) <- root(phy_tree(ps), sample(taxa_names(ps), 1), resolve.root = TRUE)
+#is.rooted(phy_tree(ps))
+
+
+#change from actual seq to "ASVs"
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+
+#save to reuse later
+saveRDS(ps, "ps.rds")
+ps <- readRDS("./ps.rds")
+ps
+
+#VIEW SUB-OBJECTS AS DESIRED
+View(tax_table(ps))
+View(otu_table(ps))
+View(sample_data(ps))
+```
+
+``` {r clean}
+
+#manually check and adjust top ASVs as needed
+tax_table(ps)[c(1,2), "Genus"] <- "Microcoleus" #is it microcoleus or phormidium
+
+#remove blank sample b/c no grave contamination found 
+subset_samples(ps, SampleID != "blank")
+
+#keep samples with more than 10,000 depth 
+ps_clean <- subset_samples(ps, sample_sums(ps) > 10000)
+
+View(sample_data(ps_clean)) #this gets rid of 14 samples. are we ok with that??
+
+saveRDS(ps_clean, "ps_clean.rds")
+ps_clean <- readRDS("./ps_clean.rds")
+ps_clean
+```
+
+
+```{r done}
+system("say done")
+```
+

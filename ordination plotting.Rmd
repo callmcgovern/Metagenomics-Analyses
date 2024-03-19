@@ -1,0 +1,290 @@
+---
+title: "MIS/ECB/FTN Ordination Plotting"
+output:
+  html_document:
+    df_print: paged
+---
+
+#Install packages and set up environment
+
+```{r setup, eval=TRUE, echo=FALSE, warning=FALSE, tidy=TRUE, message=FALSE}
+path <- "./"
+setwd(path)
+
+knitr::opts_chunk$set(
+	fig.height = 5,
+	fig.width = 7,
+	message = F,
+	warning = F
+)
+knitr::opts_knit$set(root.dir = path)
+getwd()
+
+#if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+#BiocManager::install(c("phyloseq", "microbiome", "ComplexHeatmap"), update = FALSE)
+#install.packages(
+#  "microViz",
+#  repos = c(davidbarnett = "https://david-barnett.r-universe.dev", getOption("repos"))
+#)
+library(microViz)
+#install.packages("ggraph") # for taxatree_plots()
+#install.packages("DT") # for tax_fix_interactive()
+#install.packages("corncob") # for example datasets and beta binomial models
+ # install.packages("devtools")
+devtools::install_github("paulponcet/oak")
+library("ggraph", quietly = T) 
+library("corncob", quietly = T)
+library("phyloseq", quietly = T)
+library("ggplot2", quietly = T)
+library("oak", quietly = T)
+
+
+ps_MIS_ECB_FTN <- readRDS("./ps_MIS_ECB_FTN.rds")
+ps_MIS_ECB_FTN <- subset_samples(ps_MIS_ECB_FTN, Sample.Type != "Plankton Tow")
+ps_MIS_ECB_FTN
+```
+
+# Motivation 
+Ordination plots are a great way to see any clustering or other patterns of microbiota (dis)similarity in (many) samples. 
+
+Ordinations like PCA or PCoA show the largest patterns of variation in your data, and constrained ordination techniques like RDA or CCA can show you microbial variation that could be explained by other variables in your sample_data (but interpret constrained ordinations with care, and ideally test for the statistical significance of any hypothesised associations using a method like PERMANOVA
+
+When creating an ordination plot, you first need to prepare the microbiota variables.Decide at which taxonomic rank to aggregate your data, e.g. "Genus". Consider transforming the microbial counts, e.g. using the "clr" (centred log ratio) transformation, which is often recommended for compositional data (like sequencing data)
+
+```{r prep, include=FALSE, echo=FALSE, warning=FALSE, tidy=TRUE, message=FALSE}
+ps_MIS_ECB_FTN <- 
+  ps_MIS_ECB_FTN %>%
+ tax_fix(
+  min_length = 4,
+  unknowns = c(""),
+  sep = " ", anon_unique = TRUE,
+  suffix_rank = "classified"
+ )
+#tax_fix_interactive(ps_MIS_ECB_FTN)
+
+ps_MIS_ECB_FTN <- ps_MIS_ECB_FTN %>% tax_fix(unknowns = c("Incertae Sedis"))
+
+ps_MIS_ECB_FTN %>% 
+  tax_transform(trans = "clr", rank = "Genus")
+
+ps_MIS_ECB_FTN %>% 
+  tax_transform(trans = "clr", rank = "Order")
+```
+
+Some methods, such as PCoA, require a matrix of pairwise distances between samples, which you can easily calculate with dist_calc(). Normally you should NOT transform your data when using a distance-based method, but it is useful to record an "identity" transformation anyway, to make it clear you have not transformed your data.
+
+```{r prep for pca, include=FALSE, echo=FALSE, warning=FALSE, tidy=TRUE, message=FALSE}
+ps_MIS_ECB_FTN %>% 
+  tax_transform(trans = "identity", rank = "Genus") %>% 
+  dist_calc("bray") # bray curtis distance
+
+```
+
+# PCA - Principal Components Analysis
+
+```{r pca, echo=TRUE, fig.width=3, fig.height=2}
+pca <- ps_MIS_ECB_FTN %>% 
+  tax_transform("clr", rank = "Genus") %>% 
+  # when no distance matrix or constraints are supplied, PCA is the default/auto ordination method
+  ord_calc() %>% 
+  ord_plot(color = "Site", shape = "Season", size = 2) +
+  scale_colour_brewer(palette = "Dark2")
+
+pca
+```
+
+The relative length of each loading vector indicates its contribution to each PCA axis shown, and allows you to roughly estimate which samples will contain more of that taxon e.g. samples on the left of the plot below, will typically contain more Microcoleus than samples on the right, and this taxon contributes heavily to the PC1 axis.
+
+```{r pca taxa, echo=TRUE}
+pca_taxa <- ps_MIS_ECB_FTN %>% 
+  tax_transform("clr", rank = "Genus") %>% 
+  # when no distance matrix or constraints are supplied, PCA is the default/auto ordination method
+  ord_calc(method = "PCA") %>% 
+  ord_plot(color = "Site", shape = "Season", plot_taxa = 1:10, size = 2) +
+  scale_colour_brewer(palette = "Dark2")
+print(pca_taxa)
+
+```
+
+microViz also allows you directly visualize the sample compositions on a circular barplot or "iris plot" (named because it looks kinda like an eyeball) alongside the PCA plot. The samples on the iris plot are automatically arranged by their rotational position around the center/origin of the PCA plot.
+
+```{r circle barplot #NOT WORKING, eval=FALSE, include=FALSE}
+plot <- ps_MIS_ECB_FTN %>% 
+  tax_transform("clr", rank = "Phylum") %>% 
+  # when no distance matrix or constraints are supplied, PCA is the default/auto ordination method
+  ord_calc() %>% 
+  ord_plot_iris(tax_level = "Phylum", ord_plot = "above", anno_colour = "Site")
+plot
+```
+
+# MDS with bray curtis distance instead. You cant plot taxa as vectors here though.
+
+```{r plot with bray curtis, echo=TRUE}
+MDS <- ps_MIS_ECB_FTN %>% 
+  tax_transform("identity", rank = "Genus") %>% # don't transform!
+  dist_calc("bray") %>% 
+  ord_calc("PCoA") %>% 
+  ord_plot(color = "Site", shape = "Season", size = 2) +
+  scale_colour_brewer(palette = "Dark2")
+print(MDS)
+```
+
+
+```{r unifrac #not working, eval=FALSE, include=FALSE}
+#Unifrac
+
+You can calculate dissimilarities from the UniFrac family of methods, which take into account the phylogenetic relatedness of the taxa / sequences in your samples when calculating dissimilarity. Un-weighted UniFrac, dist_calc(dist = "unifrac"), does not consider the relative abundance of taxa, only their presence (detection) or absence, which can make it (overly) sensitive to rare taxa, sequencing artefacts, and abundance filtering choices. Conversely, weighted UniFrac, "wunifrac", does put (perhaps too much) more importance on highly abundant taxa, when determining dissimilarities. The Generalised UniFrac, "gunifrac", finds a balance between these two extremes, and by adjusting the gunifrac_alpha argument of dist_calc(), you can tune this balance to your liking (although the 0.5 default should be fine!).
+
+install.packages("remotes")
+remotes::install_github("jfq3/QsRutils")
+library("QsRutils")
+#must root tree before running unifrac. 
+is.rooted(phy_tree(ps_MIS_ECB_FTN))
+#This is how you could root (verb) the tree in HMPv35 by randomly selecting an OTU as outgroup to root the tree
+rooted <- root_phyloseq_tree(phy_tree(ps_MIS_ECB_FTN))
+
+require("ape")
+phy_tree(ps_MIS_ECB_FTN)$edge.length[which(is.na(phy_tree(ps_MIS_ECB_FTN)$edge.length))] <- 0
+phy_tree(ps_MIS_ECB_FTN) <- ape::root(phy_tree(ps_MIS_ECB_FTN), sample(taxa_names(ps_MIS_ECB_FTN), 1), resolve.root = TRUE)
+
+
+
+phy = phy_tree(ps_MIS_ECB_FTN)
+phy <- ape::root(phy, sample(taxa_names(ps_MIS_ECB_FTN), 1), resolve.root=TRUE)
+phy_tree(ps_MIS_ECB_FTN) <- phy
+
+is.rooted(phy)
+is.rooted(phy_tree(ps_MIS_ECB_FTN))
+
+ps_MIS_ECB_FTN %>%
+  phyloseq_validate(verbose = FALSE) %>% 
+  tax_transform("identity", rank = "unique") %>% 
+  dist_calc("gunifrac", gunifrac_alpha = 0.5)
+```
+
+## Further dimensions 
+You can show other dimensions / axes of an ordination than just the first two, by setting the axes argument. You can judge from the variation explained by each successive axis (on a scree plot) whether this is worthwhile information to show, e.g. in the example below, it could be interesting to also show the 3rd axis, but not any others.
+
+```{r further dimensions, echo=TRUE}
+dims <- ps_MIS_ECB_FTN %>% 
+  tax_transform("identity", rank = "Genus") %>% # don't transform!
+  dist_calc("bray") %>% 
+  ord_calc("PCoA") %>% 
+  ord_get() %>% 
+  phyloseq::plot_scree() + theme(axis.text.x = element_text(size = 6))
+print(dims)
+```
+
+Pick 2 axes to look at:
+
+```{r dimensions, echo=TRUE}
+dims2 <- ps_MIS_ECB_FTN %>% 
+  tax_transform("identity", rank = "Genus") %>% # don't transform!
+  dist_calc("bray") %>% 
+  ord_calc("PCoA") %>% 
+  ord_plot(axes = c(1, 2), color = "Site", shape = "Season", size = 2) +
+  scale_colour_brewer(palette = "Dark2") 
+print(dims2)
+```
+
+## Univariable distribution side panels 
+As the ordination figures are (pretty much) just standard ggplot objects, integration with other ggplot extensions like ggside is typically possible. Below are a couple of examples using the ggside package to add univariable distribution plots for each PC, split by the same groups as in the main plot.
+
+```{r side, echo=TRUE, fig.align='default', fig.width=4, fig.height=2.5}
+#install.packages("ggside")
+library(ggside)
+
+side <- ps_MIS_ECB_FTN %>% 
+  tax_transform("identity", rank = "Genus") %>% 
+  dist_calc(dist = "bray") %>% 
+  ord_calc("PCoA") %>% 
+  ord_plot(color = "Site", shape = "Season", size = 2) +
+  scale_colour_brewer(palette = "Dark2", aesthetics = c("fill", "colour")) +
+  theme_bw() +
+  ggside::geom_xsideboxplot(aes(fill = Site, y = Site), orientation = "y") +
+  ggside::geom_ysideboxplot(aes(fill = Site, x = Site), orientation = "x") +
+  ggside::scale_xsidey_discrete(labels = NULL) +
+  ggside::scale_ysidex_discrete(labels = NULL) +
+  ggside::theme_ggside_void()
+print(side)
+```
+
+```{r side2, echo=TRUE}
+side2 <- ps_MIS_ECB_FTN %>% 
+  tax_transform("identity", rank = "Genus") %>% 
+  dist_calc(dist = "bray") %>% 
+  ord_calc("PCoA") %>% 
+  ord_plot(color = "Site", shape = "Season", size = 2) +
+  scale_colour_brewer(palette = "Dark2", aesthetics = c("fill", "colour"), name = "IBD") +
+  theme_bw() +
+  ggside::geom_xsidedensity(aes(fill = Site), alpha = 0.5, show.legend = FALSE) +
+  ggside::geom_ysidedensity(aes(fill = Site), alpha = 0.5, show.legend = FALSE) +
+  ggside::theme_ggside_void() 
+print(side2)
+```
+
+
+# RDA - Redundancy Analysis
+
+Redundancy analysis is a constrained ordination method. It displays the microbial variation that can also be explained by selected constraint variables. Behind the scenes, a linear regression model is created for each microbial abundance variable (using the constraints as the explanatory variables) and a PCA is performed using the fitted values of the microbial abundances.
+
+```{r rda, echo=TRUE}
+our_rda <- ps_mutate(
+  ps_MIS_ECB_FTN,
+  site = dplyr::recode(Site, "Alpena Fountain" = 1 , "El Cajon Bay" = 2, "Middle Island Sinkhole" = 3)
+)
+our_rda <- tax_transform(our_rda, "clr", rank = "Phylum") %>%
+    ord_calc(
+      constraints = c("SO4.mg.L", "ODO.mg.L", "Temp"),  #,"Season"),
+      method = "RDA", 
+      scale_cc = FALSE # doesn't make a difference
+    ) 
+     
+our_rda <- microViz::ord_plot(our_rda, colour = "Site", size = 3, alpha = 0.5, plot_taxa = 1:10, tax_lab_style = tax_lab_style(type = "text",  fontface = "bold.italic", size=3))
+print(our_rda)
+     
+```
+
+```{r custom, echo=TRUE}
+# first we make a function that replaces any unwanted "_" in our taxa labels with spaces
+library(stringr) 
+renamer <- function(x) str_replace(x, pattern = "_", replacement = " ")
+
+three <- ps_mutate(
+  ps_MIS_ECB_FTN,
+  site = dplyr::recode(Site, "Alpena Fountain" = 1 , "El Cajon Bay" = 2, "Middle Island Sinkhole" = 3)
+)
+three <- tax_transform(three, "clr", rank = "Order") %>%
+    ord_calc(
+      constraints = c("pH", "Cond..", "Temp"),  #,"Season"),
+      method = "RDA", 
+      scale_cc = FALSE # doesn't make a difference
+    ) 
+
+three_plot <- ord_plot(three,
+    colour = "Site", size = 4, alpha = 0.5, shape = "Season",
+    auto_caption = NA, # remove the helpful automatic caption
+    plot_taxa = 1:10, taxon_renamer = renamer, # renamer is the function we made earlier
+    tax_vec_length = 4.5, 
+    tax_lab_length = 4.6, 
+    tax_lab_style = tax_lab_style(type = "text", max_angle = 90, fontface = "bold.italic", size=2), 
+    constraint_vec_style = vec_constraint(1.5, alpha = 0.5), 
+    constraint_vec_length = 3, constraint_lab_length = 3.3,
+    constraint_lab_style = constraint_lab_style(
+      alpha = 0.8, size = 3, max_angle = 90, perpendicular = TRUE)
+  ) +
+  scale_colour_brewer(palette = "Set2") +
+  # You can set any scale's values manually, such as the shapes used
+  #scale_shape_manual(values = c(
+  #  active = "circle", mild = "circle cross",
+  #  inactive = "circle open", control = "square open"
+  #)) +
+  ggtitle(
+    label = "[Insert your exciting interpretations here?]",
+    subtitle = "RDA with clr-transformed genera: constraints in red, taxa in black"
+  ) +
+  labs(caption = "x samples, x total genera, etc") +
+  coord_fixed(ratio = 1, clip = "off", xlim = c(-6, 6), ylim = c(-6,6)) 
+
+print(three_plot)
+```

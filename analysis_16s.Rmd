@@ -1,0 +1,622 @@
+---
+title: "16S universal marker Analysis"
+output: html_document
+date: "2022-12-16"
+---
+# Analysis of 16S barcoding of samples from the Middle Island Sinkhole, El Cajon Bay, Great Sulfur Springs, and the Fountain. Here we are using data that has been demultiplexed, trimmed, filtered, denoised, and merged with the Dada2 pipelines. 
+## This data includes a taxa table which includes all AVS and their taxonomic designation, a ASV table which includes the # of times that ASV showed up in a sample, a sample table with meta data such as site, season, water temp, etc, and a phyogenetic tree of all ASVs. All data is stored in a phyloseq object that we will load in as the first step in this pipeline.  
+
+```{r setup, eval=TRUE, echo=FALSE, warning=FALSE, tidy=TRUE}
+path <- "./"
+setwd(path)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = path)
+getwd()
+
+#load libraries
+library("knitr", quietly = T)        
+library("magrittr", quietly = T)
+library("DECIPHER", quietly = T) 
+library("phangorn", quietly = T)
+library("phyloseq", quietly = T) 
+library("phytools", quietly = T)
+library("vegan", quietly = T)        # STATS
+library("ggplot2", quietly = T)      # graphics
+library("dplyr", quietly = T)        # filter and reformat data frames
+library("tibble", quietly = T)       # Needed for converting column to row names
+#install.packages("SRS")
+library(SRS, quietly = T)
+
+ps <- readRDS("./ps.rds")
+
+```
+
+```{r add new meta}
+#need to add new metadata. 
+X <- otu_table(ps)
+Y <- tax_table(ps)
+z <- phy_tree(ps)
+
+meta_data <- read.csv("../2022meta.csv")
+sample_data <- meta_data[,-1]
+rownames(sample_data) <- sample_data[,1]
+
+ps <- phyloseq(otu_table(X), taxa_are_rows = FALSE, 
+               sample_data(sample_data), 
+               tax_table(Y), 
+               phy_tree(z))
+
+#save to reuse later
+saveRDS(ps, "ps.rds")
+ps <- readRDS("./ps.rds")
+ps
+
+#VIEW SUB-OBJECTS AS DESIRED
+View(tax_table(ps))
+View(otu_table(ps))
+View(sample_data(ps))
+View(phy_tree(ps))
+
+```
+
+``` {r clean}
+#remove blank sample b/c no grave contamination found 
+subset_samples(ps, SampleID != "blank")
+
+#keep samples with more than 10,000 depth 
+ps_nolows <- subset_samples(ps, sample_sums(ps) > 10000)
+View(sample_data(ps_nolows)) #this gets rid of 13 samples. are we ok with that??
+
+saveRDS(ps_nolows, "ps_nolows.rds")
+ps_nolows <- readRDS("./ps_nolows.rds")
+ps_nolows
+```
+
+``` {r explore metadata, eval=TRUE, echo=FALSE, warning=FALSE, tidy=TRUE}
+nsamples(ps)
+head(sample_names(ps))
+
+sample_variables(ps)
+metadata <- data.frame(sample_data(ps))
+head(metadata)
+table(sample_data(ps)$Site)
+```
+
+### First, lets check out our sequencing depth and calculate the mean and median seq depth per sample. 
+This shows us how many ASVs were sequenced from each sample or site. 
+We will also make a histogram of our read counts and finally add the depth to our meta data.
+``` {r explore reads, eval=TRUE, echo=TRUE, warning=FALSE, tidy=TRUE}
+
+depth <- sample_sums(ps) 
+mean(depth)
+median(depth)
+range(depth)
+
+depth_nl <- sample_sums(ps_nolows) 
+mean(depth_nl)
+median(depth_nl)
+range(depth_nl)
+
+site <- merge_samples(ps, "Site")
+head(sort(sample_sums(site)))
+site_nl <- merge_samples(ps_nolows, "Site")
+head(sort(sample_sums(site_nl)))
+
+hist(sample_sums(ps), main="Histogram: Read Counts", xlab="Total Reads", #Read count histogram 
+     border="blue", col="green", las=1, breaks=12)
+
+hist(sample_sums(ps_nolows), main="Histogram: Read Counts", xlab="Total Reads", #Read count histogram 
+     border="blue", col="green", las=1, breaks=12)
+
+metadata$total_reads <- sample_sums(ps) #adds read count info to meta data table
+summary(sample_data(ps))
+```
+
+### Now we will go through several ways of cleaning the data and viewing it in various ways. 
+Here we look at the taxonomic ranks available in our dataset and then remove any ASVs not assigned at phylum level since these are likely sequencing artifacts. 
+```{r TAXONOMIC CLEAN UP, eval=TRUE, echo=TRUE, warning=FALSE, tidy=TRUE}
+rank_names(ps) #show available ranks
+tax_table(ps)[1:10, c(2,6)] #see first 10 rows at phylum and genus level 
+ps_clean <- subset_taxa(ps_nolows, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized")) #Remove ambiguous taxa (ASV undefined at phylum are likely artifact)
+ps_clean_nolows <- subset_taxa(ps_nolows, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized")) 
+
+
+#tax_table(ps_clean)[c(1:3), "Genus"] <- "Microcoleus" #is it microcoleus or phormidium
+#tax_table(ps_clean)[1:10, c(2,6)] #CHECK THE CHANGE
+
+#prune_taxa(taxa_sums(ps_clean) > 100, ps_clean) #total of 3364 ASVs seen at least 100 times
+#filter_taxa(ps_clean, function(x) sum(x > 10) > (0.1*length(x)), TRUE)  # A total of 1279 taxa seen at least 10 times in at least 10% of sampleps_ECB <-
+```
+
+Here we can subset data by phylum, site, or anything of interest and explore this subset. 
+We may end up needing these subsets in later analyses/vizualizations.
+``` {r SUBSET DATA, eval=TRUE, echo=FALSE, warning=FALSE}
+#(ps_cyano <- subset_taxa(ps_clean, Phylum == "Cyanobacteria")) #640 ASVs identified as cyano
+#head(tax_table(ps_cyano))
+
+ps_MIS_ECB_FTN <- subset_samples(ps, Site %in% c("Middle Island Sinkhole", "El Cajon Bay", "Alpena Fountain"))
+saveRDS(ps_MIS_ECB_FTN, "ps_MIS_ECB_FTN.rds")
+
+ps_MIS <- subset_samples(ps, Site == "Middle Island Sinkhole")
+ps_MIS <- prune_taxa(taxa_sums(ps_MIS) > 0, ps_MIS) 
+saveRDS(ps_MIS, file = "./by_site/ps_MIS.RDS")
+
+ps_FTN <- subset_samples(ps, Site == "Alpena Fountain")
+ps_FTN <- prune_taxa(taxa_sums(ps_FTN) > 0, ps_FTN) 
+saveRDS(ps_FTN, file = "./by_site/ps_FTN.RDS")
+
+ps_OAK <- subset_samples(ps, Site == "Oak Spring")
+ps_OAK <- prune_taxa(taxa_sums(ps_OAK) > 0, ps_OAK) 
+saveRDS(ps_OAK, file = "./by_site/ps_OAK.RDS")
+
+ps_ECB <- subset_samples(ps, Site == "El Cajon Bay")
+ps_ECB <- prune_taxa(taxa_sums(ps_ECB) > 0, ps_ECB) 
+saveRDS(ps_ECB, file = "./by_site/ps_ECB.RDS")
+
+ps_GSS <- subset_samples(ps, Site == "Great Sulphur Spring")
+ps_GSS <- prune_taxa(taxa_sums(ps_GSS) > 0, ps_GSS) 
+saveRDS(ps_GSS, file = "./by_site/ps_GSS.RDS")
+```
+
+Here we calculate relative abundances of ASVs per sample (number of reads of an ASV in a
+sample/number of reads in a sample). 
+``` {r abundance per sample}
+ps_relabund <- transform_sample_counts(ps_clean, function(x) x / sum(x)) 
+otu_table(ps_relabund)[c(1:10), 1:10]
+```
+
+5.1.4. Non-zero values per OTU
+In order to check how the different OTU/ASV are shared bewteen samples, plot the number of non-zero values for each OTU
+``` {r nonzero}
+data_otu <- otu_table(ps_clean)
+nb_var <- dim(data_otu)[2] # number of columns, here variables (OTU)
+nb_samples <- dim(data_otu)[1] # nb of rows, here samples
+
+sum(data_otu) #num of seqs
+sum(data_otu == 0)
+sum(data_otu == 0) / (nb_var * nb_samples) * 100
+
+non_zero <- 0*1:nb_var
+
+for (i in 1:nb_var){
+  non_zero[i]<-sum(data_otu[,i] != 0)
+  }
+
+plot(non_zero, xlab = "OTU", ylab = "Frequency", main = "Number of non zero values", las = 1)
+```
+
+Checking sequencing depth: 
+``` {r rarefaction curves}
+library(ggplot2)
+install.packages("remotes")
+remotes::install_github("gauravsk/ranacapa")
+p <- ggrare(ps, step = 1000, color = "Site", label = "SampleID", se = FALSE)
+p <- p + facet_wrap(~Site)
+p
+
+site <- merge_samples(ps, group = "Site")
+p_site <- ggrare(site, step = 1000, label = "Site", se = FALSE)
+p_site
+
+
+p <- ggrare(ps,
+            step = 500,
+            color = "Site",
+            plot = T,
+            parallel = T,
+            se = F, 
+            )
+p <- p + 
+  facet_wrap(~ Site ) + 
+  geom_vline(xintercept = min(sample_sums(ps)), 
+             color = "gray60")
+plot(p)
+```
+
+### Sub-setting data by different taxonomic levels. 
+ * Dedup will take all ASVs with the same level assignment and put them into one unit with a count. 
+ * After deduping we can make tables with the top 10 genera/phyla/order/etc.
+ * Then we replace the ASV with the phylum name.
+ * Finally, you can save this as a CSV locally. 
+ 
+``` {r kingdom}
+ ps_kingdom <- tax_glom(physeq=ps_clean, taxrank = "Kingdom", NArm = T) #agglomoration function
+taxa_names(ps_kingdom) <- tax_table(ps_kingdom)[,"Kingdom"] #replace ASV with name of phylum
+taxa_names(ps_kingdom) #look at taxa names now
+
+top_kingdom_table <- otu_table(ps_kingdom)
+top_kingdom_table #print first 20 rows of top 10 phylum table
+write.csv(top_kingdom_table , "./top_kingdom_table.csv", row.names=FALSE)
+
+kingdom.transform <- transform_sample_counts(top_kingdom_table, function(x) x / sum(x)) #rel abundance of phyla in samples
+kingdom.transform <-round(otu_table(kingdom.transform), digits = 3)
+
+kingdom_plots <- plot_bar(ps_kingdom, fill = "Kingdom") + 
+  geom_bar(aes(color=Kingdom, fill=Kingdom), stat="identity", position="stack") #make bar plot of phyla in each sample
+
+ps_site <- merge_samples(ps_kingdom, "Site") #group these per sampling site
+
+relabund_king <- transform_sample_counts(ps_site, function(x) x / sum(x))
+
+kingdom_site <- plot_bar(relabund_king, fill = "Kingdom") + 
+  geom_bar(aes(color=Kingdom, fill=Kingdom), stat="identity", position="stack")
+
+kingdom_site
+```
+ 
+```{r DEDUP AND TOP phyla TABLES, eval=TRUE, echo=TRUE, message = F, warning=FALSE, tidy=TRUE}
+ps.phylum <- tax_glom(physeq=ps_clean, taxrank = "Phylum", NArm = T) #agglomoration function
+taxa_names(ps.phylum) <- tax_table(ps.phylum)[,"Phylum"] #replace ASV with name of phylum
+taxa_names(ps.phylum)[1:10] #look at taxa names now -- 76 phyla total 
+
+phyla_table <- otu_table(ps.phylum)
+write.csv(top_phyla_table , "./phyla_table.csv", row.names=FALSE)
+
+phy.transform <- transform_sample_counts(top_phyla_table, function(x) x / sum(x)) #rel abundance of phyla in samples
+phy.transform <-round(otu_table(phy.transform), digits = 3)
+```
+
+```{r find top 90% phyla}
+#10
+ten_phyla_table <- phyla_table[, 1:10] 
+(sample_sums(ten_phyla_table)/sample_sums(ps_clean))*100
+print("__________________________________________________________________")
+#15
+fif_phyla_table <- phyla_table[, 1:15] 
+(sample_sums(fif_phyla_table)/sample_sums(ps_clean))*100
+print("__________________________________________________________________")
+#18
+TWENTY_phyla_table <- phyla_table[, 1:20] 
+(sample_sums(TWENTY_phyla_table)/sample_sums(ps_clean))*100
+
+#20 PHYLA = 90% OF ALL PHYLA IN ALL SAMPLES! -- IF WE CHANGE 90 TO 85 WE CAN SET IT TO 15 PHYLA. HOW DO WE CHOOSE??? 
+```
+
+### Now we can make a bar plot of top phyla per sample, per site, etc. (Here we do it per site but we can do this with any column in the metadata table)
+```{r bar plots, eval=TRUE, echo=FALSE, warning=FALSE, tidy=TRUE}
+twenty_phyla <- names(sort(taxa_sums(ps.phylum), T)[1:20]) # using top 20 phyla
+twenty_phyla <- prune_taxa(twenty_phyla, ps.phylum)
+twenty_phyla_plots <- plot_bar(twenty_phyla, fill = "Phylum") + 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position="stack")
+
+ps_site <- merge_samples(twenty_phyla, "Site") #group these per sampling site
+phyla_site <- plot_bar(ps_site, fill = "Phylum") + 
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position="stack")
+```
+
+### Top 20 phyla in all samples
+```{r 20 phyla, eval=TRUE, echo=TRUE, warning=FALSE, tidy=TRUE, fig.align='center', fig.width=7, fig.height=7}
+twenty_phyla_plots
+```
+
+### Top 20 phyla stacked plot by site.
+```{r 20 phyla by site, eval=TRUE, echo=TRUE, warning=FALSE, tidy=TRUE, fig.align='center', fig.width=7, fig.height=7}
+phyla_site 
+```
+
+
+## Using relative abundance to make plots instead
+```{r relative abundance, eval=TRUE, echo=FALSE, warning=FALSE, tidy=TRUE}
+relabund_phyla <- transform_sample_counts(twenty_phyla, function(x) x / sum(x))
+RA_phyla_plot <- plot_bar(relabund_phyla, x = "Sample", fill="Phylum") + geom_bar(aes(color = Phylum, fill = Phylum), stat = "identity", position = "stack") #plot function
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+
+
+site_p1 <- transform_sample_counts(relabund_phyla, function(x) x / sum(x))
+site_p2 <- merge_samples(site_p1, "Site")
+site_p3 <- transform_sample_counts(site_p2, function(x) x / sum(x))
+```
+
+### And by genus
+```{r genus, eval=TRUE, echo=FALSE, warning=FALSE, tidy=TRUE}
+#MAKING TOP GENERA BAR PLOT
+ps.gen <- tax_glom(physeq=ps_clean, taxrank = "Genus", NArm = T) #agglomoration command
+topG <- names(sort(taxa_sums(ps.gen), TRUE)[1:20]) #pick top # of choice here
+topG <- prune_taxa(topG, ps.gen) # prune based on selection above
+relabundG <- transform_sample_counts(topG, function(x) x / sum(x)) #find relative abundance of top genera
+genus_plot <- plot_bar(relabundG, fill="Genus") + geom_bar(aes(color = Genus, fill = Genus), stat = "identity", position = "stack") 
+labs(x="Sample", y = "Relative Abundance\n") + theme(panel.background = element_blank()) + theme_bw() + theme(text = element_text(size = 16))
+
+#group by site
+site_g1 <- transform_sample_counts(relabundG, function(x) x / sum(x))
+site_g2 <- merge_samples(site_g1, "Site")
+site_g3 <- transform_sample_counts(site_g2, function(x) x / sum(x))
+```
+
+### Rendering relative abundance plots by phyla
+## TRY DOING IT PHOTOSYNTHETIC VS HETEROTROPHIC 
+
+```{r rel phyla, eval=TRUE, echo=TRUE, warning=FALSE, tidy=TRUE, fig.align='center', fig.width=20, fig.height=16}
+RA_phyla_plot
+plot_bar(site_p3, fill="Phylum")
+
+```
+
+### and...rendering relative abundance plots by genus
+## TRY DOING BY ANAEROBIC VS AREOBIC GENERA 
+## DO BY EACH SITE BY SAMPLE 
+```{r rel genus, eval=TRUE, echo=TRUE, warning=FALSE, tidy=TRUE, fig.align='center', fig.width=20, fig.height=16}
+genus_plot
+plot_bar(site_g3, fill="Genus")
+```
+## DO THIS PER SITE AND DIVIDE BY SEASON OR LAYER ETC 
+
+``` {r micrshades, fig.align='center', fig.width=16, fig.height=10}
+#https://karstenslab.github.io/microshades/articles/microshades-GP.html
+#remotes::install_github("KarstensLab/microshades")
+#library(microshades)
+#install.packages("remotes")
+#remotes::install_github("mikemc/speedyseq")
+#
+#library(phyloseq)
+#library(ggplot2)
+#library(dplyr)
+#library(cowplot)
+#library(patchwork)
+
+# Agglomerate and normalize the phyloseq object, and melt to a data frame
+mdf_prep <- prep_mdf(ps_clean)
+
+# Generate a color object for the specified data
+color_objs_GP <- create_color_dfs(mdf_prep,selected_groups = c('Proteobacteria', 'Cyanobacteria', 'Desulfobacterota', 'Bacteroidota','Verrucomicrobiota') , cvd = TRUE)
+
+# Extract
+mdf_GP <- color_objs_GP$mdf
+cdf_GP <- color_objs_GP$cdf
+
+# Plot
+plot <- plot_microshades(mdf_GP, cdf_GP)
+
+plot_1 <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.key.size = unit(0.2, "cm"), text=element_text(size=10)) +
+  theme(axis.text.x = element_text(size= 6)) 
+
+plot_1 
+
+#Now we seperate by site and do the same 
+ps_site <- merge_samples(ps_clean, "Site") #group these per sampling site
+mdf_prep_2 <- prep_mdf(ps_site)
+color_objs_GP_2 <- create_color_dfs(mdf_prep_2,selected_groups = c('Proteobacteria', 'Cyanobacteria', 'Desulfobacterota', 'Bacteroidota','Verrucomicrobiota') , cvd = TRUE)
+mdf_GP_2 <- color_objs_GP_2$mdf
+cdf_GP_2 <- color_objs_GP_2$cdf
+plot2 <- plot_microshades(mdf_GP_2, cdf_GP_2)
+plot_2 <- plot2 + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.key.size = unit(0.2, "cm"), text=element_text(size=10)) +
+  theme(axis.text.x = element_text(size= 6)) 
+plot_2
+
+#now divided the plots by site. 
+plot_3 <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.key.size = unit(0.2, "cm"), text=element_text(size=10)) +
+  theme(axis.text.x = element_text(size= 6)) +
+  facet_wrap(~Site, scales = "free_x", nrow = 2) +
+  theme (strip.text.x = element_text(size = 6))
+plot_3
+
+
+# Now with a cutom legend
+GP_legend <-custom_legend(mdf_GP, cdf_GP)
+
+plot_diff <- plot + scale_y_continuous(labels = scales::percent, expand = expansion(0)) +
+  theme(legend.position = "none")  +
+  theme(axis.text.x = element_text(size= 6)) +
+  facet_wrap(~Site, scales = "free_x", nrow = 2) +
+  theme(axis.text.x = element_text(size= 6)) + 
+  theme(plot.margin = margin(6,20,6,6))
+
+plot_grid(plot_diff, GP_legend,  rel_widths = c(1, .25))
+
+
+```
+
+
+## DO WITH TOP PHYLA (BASED ON PREVIOUS CUT OFF) 
+``` {r miaViz}
+library("miaViz")
+TSE <- if (requireNamespace("phyloseq")) {
+    data(ps_clean, package="phyloseq")
+    makeTreeSEFromPhyloseq(ps_MIS_ECB_FTN)
+}
+
+ps_transformed <- transformCounts(TSE, method = "relabundance")
+plotAbundance(ps_transformed, rank = "Kingdom", assay_name = "relabundance")
+
+
+prev_phylum <- getPrevalentTaxa(TSE, rank = "Phylum",
+                                detection = 0.001,
+                                assay_name = "counts")
+
+plotAbundance(TSE[rowData(TSE)$Phylum %in% prev_phylum],
+              rank = "Phylum")
+
+library(patchwork)
+plots <- plotAbundance(TSE[rowData(TSE)$Phylum %in% prev_phylum],
+                       features = "Site",
+                       rank = "Phylum",
+                       assay_name = "counts")
+plots$abundance / plots$Site +
+     plot_layout(heights = c(10, 2))
+
+
+plotTaxaPrevalence(TSE, rank = "Phylum",
+                   detections = c(0, 0.001, 0.01, 0.1, 0.2))
+
+```
+
+
+
+## Alpha Diversity
+
+```{r Diversity measurements}
+#plot overall richness measures 
+richness <- plot_richness(ps_clean, x="SampleID", color = "Site") +geom_boxplot()
+richness 
+
+#just 2 
+rich <- plot_richness(ps_clean, measures = c("Simpson" , "Shannon"), x="SampleID", color = "Site") + theme_bw()
+rich
+
+
+#group by site and color by season
+plot_richness(ps_clean, x="Site", color = "Season", measures=c("Simpson", "Shannon"))
+
+alpha <- plot_richness(ps_clean, x="Site", color = "Site", measures=c("Observed", "Shannon")) + geom_boxplot()
+alpha
+```
+
+```{r MDS all samples}
+pslog <- transform_sample_counts(ps_clean, function(x) log(1 + x))
+
+out.pcoa.log <- ordinate(pslog,  method = "MDS", distance = "bray")
+evals <- out.pcoa.log$values[,1]
+plot_ordination(pslog, out.pcoa.log, color = "Site", label= "Phylum") + #add phylum to metadata 
+  labs(col = "Site") 
+  coord_fixed(sqrt(evals[2] / evals[1]))
+  
+
+
+```
+
+
+``` {r ord}
+#https://joey711.github.io/phyloseq/plot_ordination-examples.html
+
+#Remove OTUs that do not show appear more than 5 times in more than 1/4 the samples
+filt = genefilter_sample(ps_clean, filterfun_sample(function(x) x > 5), A=0.25*nsamples(ps_clean))
+ps_pruned = prune_taxa(filt, ps_clean)
+#transform to even depth 
+transformed = transform_sample_counts(ps_pruned, function(x) 1E6 * x/sum(x))
+#Keep only the most abundant five phyla.
+phylum.sum = tapply(taxa_sums(transformed), tax_table(transformed)[, "Phylum"], sum, na.rm=TRUE)
+top5phyla = names(sort(phylum.sum, TRUE))[1:5]
+transformed = prune_taxa((tax_table(transformed)[, "Phylum"] %in% top5phyla), transformed)
+#make and print ordination plot
+ord <- ordinate(transformed, "NMDS", "bray")
+p1 = plot_ordination(transformed, ord, type="taxa", color="Phylum", title="taxa")
+print(p1)
+
+#seperate by phylum
+p1 + facet_wrap(~Phylum, 3)
+
+#seperate by Site - interesting 
+p2 = plot_ordination(transformed, ord, type="Site", color="Site") #can add shape = X 
+p2 + geom_polygon(aes(fill=Site)) + geom_point(size=5) + ggtitle("Site")
+
+
+# more ordination methods
+library(plyr)
+dist = "bray"
+ord_meths = c("DCA", "CCA", "RDA", "DPCoA", "NMDS", "MDS", "PCoA")
+plist = llply(as.list(ord_meths), function(i, physeq, dist){
+        ordi = ordinate(physeq, method=i, distance=dist)
+        plot_ordination(physeq, ordi, "samples", color="SampleType")
+}, transformed, dist)
+
+
+
+plot <- ps_clean_nolows %>% 
+  tax_transform("clr", rank = "Phylum") %>% 
+  # when no distance matrix or constraints are supplied, PCA is the default/auto ordination method
+  ord_calc() %>% 
+  ord_plot_iris(tax_level = "Phylum", ord_plot = "list", anno_colour = "Site")
+plot
+
+```
+## TRY PER SITE 
+``` {r trees, fig.length=16, fig.width=16}
+#could do tree for phyla, orders in cyano, or genera. 
+topGenera <- names(sort(taxa_sums(ps_clean), TRUE)[1:50]) #pick top # of choice here
+topGenera <- prune_taxa(topGenera, ps.gen) # prune based on selection above
+tree1 <- plot_tree(topGenera, color = "Phylum", label.tips = "Genus", size = "abundance", plot.margin = 0.5, ladderize = T, shape = "Site" ) 
+tree1
+
+```
+```{r heat, fig.length=16, fig.width=16}
+total <- sum(depth)
+heatmap <- plot_heatmap(ps_clean, method = "NMDS", distance = "bray")
+heatmap
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+_______________________________________________________________________________________________
+##continue working here 
+
+```{r beta diversity, eval=FALSE, include=FALSE}
+
+ ps_rare <- rarefy_even_depth(ps_clean, sample.size = 5000, rngseed = 123, replace = F)
+ ##try : 'set.seed(123); .Random.seed', 
+ sample_sums(ps_rare)
+ 
+ ps_rare_bray <- ordinate(ps_clean, "NMDS", "bray", quietly = TRUE)
+ plot_ordination(ps_rare, ps_rare_bray) + geom_point(size=3)
+```
+
+```{r heatmaps and fancy thing, eval=FALSE, include=FALSE}
+total <- sum(depth)
+heatmap <- plot_heatmap(ps_clean, method = "NMDS", distance = "bray")
+#ASVs that represent at least 2% of reads in at least one sample 
+ps_abund <- filter_taxa(ps_clean, function(x) sum(x > total*0.02) > 0, TRUE)
+otu_table(ps_abund)
+abundant <- plot_heatmap(ps_abund, method = "NMDS", distance = "bray")
+#ID abundant asvs by genus 
+abun_genus <- plot_heatmap(ps_abund, method = "NMDS", distance = "bray", 
+                                  taxa.label = "Genus", taxa.order = "Genus", 
+                                  low="pink", high="red", na.value="beige")
+
+#shows us ASVs are similar in sinkhole vs bay vs fountain (ftn has little diversity)
+abun_location <- merge_samples(ps_abund, "Site")
+test <- plot_heatmap(ps_abund, method = "NMDS", distance = "bray", 
+                     taxa.label = "Genus", taxa.order = "Genus", 
+                     low="pink", high="red", na.value="beige")  
+
+#colnames(heatmap) <- c("Ftn.top.w","Ftn.mid","FTn.bottom","Alcove.sinkhole","E.C.bay","MIS.Core_c","MIS.Core_+N","MIS.Core_+O","Ftn.top.p")
+
+richness <- plot_richness(ps_abund, measures = c("Chao1", "Simpson", "Shannon"))
+
+#i dont really understand anything from here down 
+ord <- ordinate(cyano_abun_location, "NMDS", "bray")
+fancy_plot <- plot_ordination(cyano_abun_location, ord, type = "taxa", color = "Genus", shape = "Order", title= "OTUs")
+fancier_plot <- plot_ordination(cyano_abun_location, ord, type="taxa", color="Genus", 
+                                title="OTUs", label="Genus") + 
+  facet_wrap(~Order, 3)
+
+#network analyses
+wow_so_fancy <- plot_net(cyano_abun_location, distance = "(A+B-2*J)/(A+B)", type = "taxa", 
+                         maxdist = 0.8, color="Order", point_label="Genus")
+
+
+#render heatmaps
+heatmap
+abundant
+abun_genus
+test
+fancy_plot
+fancier_plot
+wow_so_fancy
+```
+
+```{r rendering trees, eval=FALSE, include=FALSE}
+#could do tree for phyla, orders in cyano, or genera. 
+topGenera <- names(sort(taxa_sums(ps_clean), TRUE)[1:50]) #pick top # of choice here
+topGenera <- prune_taxa(topGenera, ps.gen) # prune based on selection above
+tree1 <- plot_tree(topGenera, color = "Site", label.tips = "Genus", size = "abundance", plot.margin = 0.5, ladderize = T) #shape = "Order" 
+
+#cyano_abun_location is a subset of ASVs above 2% in a sample and organized by location
+tree2 <- plot_tree(cyano_abun_location, color = "Sample", shape = "Order", label.tips = "Genus", 
+                   size = "abundance", plot.margin = 0.5, ladderize = TRUE)
+
+tree1
+tree2
+```
